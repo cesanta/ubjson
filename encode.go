@@ -1,4 +1,5 @@
 // Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2015 Cesanta Software.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -13,7 +14,7 @@ package ubjson
 import (
 	"bytes"
 	"encoding"
-	"encoding/base64"
+	"encoding/binary"
 	"math"
 	"reflect"
 	"runtime"
@@ -22,7 +23,6 @@ import (
 	"strings"
 	"sync"
 	"unicode"
-	"unicode/utf8"
 )
 
 // Marshal returns the JSON encoding of v.
@@ -401,18 +401,19 @@ func newTypeEncoder(t reflect.Type, allowAddr bool) encoderFunc {
 	}
 }
 
-func invalidValueEncoder(e *encodeState, v reflect.Value, quoted bool) {
-	e.WriteString("null")
+func invalidValueEncoder(e *encodeState, v reflect.Value, _ bool) {
+	e.WriteString("N")
 }
 
 func marshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	if v.Kind() == reflect.Ptr && v.IsNil() {
-		e.WriteString("null")
+		e.WriteString("N")
 		return
 	}
 	m := v.Interface().(Marshaler)
 	b, err := m.MarshalJSON()
 	if err == nil {
+		// TODO(imax): parse into interface{} and serialize again.
 		// copy JSON into buffer, checking validity.
 		err = compact(&e.Buffer, b, true)
 	}
@@ -424,12 +425,13 @@ func marshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 func addrMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	va := v.Addr()
 	if va.IsNil() {
-		e.WriteString("null")
+		e.WriteString("N")
 		return
 	}
 	m := va.Interface().(Marshaler)
 	b, err := m.MarshalJSON()
 	if err == nil {
+		// TODO(imax): parse into interface{} and serialize again.
 		// copy JSON into buffer, checking validity.
 		err = compact(&e.Buffer, b, true)
 	}
@@ -440,12 +442,13 @@ func addrMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 
 func textMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	if v.Kind() == reflect.Ptr && v.IsNil() {
-		e.WriteString("null")
+		e.WriteString("N")
 		return
 	}
 	m := v.Interface().(encoding.TextMarshaler)
 	b, err := m.MarshalText()
 	if err == nil {
+		e.WriteByte('S')
 		_, err = e.stringBytes(b)
 	}
 	if err != nil {
@@ -456,12 +459,13 @@ func textMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 func addrTextMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	va := v.Addr()
 	if va.IsNil() {
-		e.WriteString("null")
+		e.WriteString("N")
 		return
 	}
 	m := va.Interface().(encoding.TextMarshaler)
 	b, err := m.MarshalText()
 	if err == nil {
+		e.WriteByte('S')
 		_, err = e.stringBytes(b)
 	}
 	if err != nil {
@@ -469,63 +473,99 @@ func addrTextMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	}
 }
 
-func boolEncoder(e *encodeState, v reflect.Value, quoted bool) {
-	if quoted {
-		e.WriteByte('"')
-	}
+func boolEncoder(e *encodeState, v reflect.Value, _ bool) {
 	if v.Bool() {
-		e.WriteString("true")
+		e.WriteString("T")
 	} else {
-		e.WriteString("false")
-	}
-	if quoted {
-		e.WriteByte('"')
+		e.WriteString("F")
 	}
 }
 
-func intEncoder(e *encodeState, v reflect.Value, quoted bool) {
-	b := strconv.AppendInt(e.scratch[:0], v.Int(), 10)
-	if quoted {
-		e.WriteByte('"')
+func intEncoder(e *encodeState, v reflect.Value, _ bool) {
+	var t reflect.Kind
+	switch v.Kind() {
+	case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		t = v.Kind()
+	case reflect.Int:
+		n := v.Int()
+		switch {
+		case n <= 127 && n >= -128:
+			t = reflect.Int8
+		case n <= 32767 && n >= -32768:
+			t = reflect.Int16
+		case n <= 2147483647 && n >= -2147483648:
+			t = reflect.Int32
+		default:
+			t = reflect.Int64
+		}
 	}
-	e.Write(b)
-	if quoted {
-		e.WriteByte('"')
+	switch t {
+	case reflect.Int8:
+		e.WriteByte('i')
+		binary.Write(e, binary.BigEndian, int8(v.Int()))
+	case reflect.Int16:
+		e.WriteByte('I')
+		binary.Write(e, binary.BigEndian, int16(v.Int()))
+	case reflect.Int32:
+		e.WriteByte('l')
+		binary.Write(e, binary.BigEndian, int32(v.Int()))
+	case reflect.Int64:
+		e.WriteByte('L')
+		binary.Write(e, binary.BigEndian, int64(v.Int()))
 	}
 }
 
-func uintEncoder(e *encodeState, v reflect.Value, quoted bool) {
-	b := strconv.AppendUint(e.scratch[:0], v.Uint(), 10)
-	if quoted {
-		e.WriteByte('"')
+func uintEncoder(e *encodeState, v reflect.Value, _ bool) {
+	// UBJSON has only uint8, so anything bigger than that must be encoded as
+	// signed integer.
+	var t reflect.Kind
+	switch v.Kind() {
+	case reflect.Uint8:
+		t = v.Kind()
+	case reflect.Uint16, reflect.Uint32:
+		// TODO(imax): choose the smallest possible type here.
+		t = reflect.Int64
+	case reflect.Uint64, reflect.Uint, reflect.Uintptr:
+		if v.Uint() <= 9223372036854775807 {
+			t = reflect.Int64
+		} else {
+			t = reflect.String
+		}
 	}
-	e.Write(b)
-	if quoted {
-		e.WriteByte('"')
+	switch t {
+	case reflect.Uint8:
+		e.WriteByte('u')
+		binary.Write(e, binary.BigEndian, uint8(v.Uint()))
+	case reflect.Int64:
+		e.WriteByte('L')
+		binary.Write(e, binary.BigEndian, int64(v.Uint()))
+	case reflect.String:
+		e.WriteByte('H')
+		s := strconv.FormatUint(v.Uint(), 10)
+		intEncoder(e, reflect.ValueOf(len(s)), false)
+		e.WriteString(s)
+	default:
+		e.error(&UnsupportedValueError{v, "unknown type for uint"})
 	}
 }
 
-type floatEncoder int // number of bits
-
-func (bits floatEncoder) encode(e *encodeState, v reflect.Value, quoted bool) {
+func float32Encoder(e *encodeState, v reflect.Value, _ bool) {
 	f := v.Float()
 	if math.IsInf(f, 0) || math.IsNaN(f) {
-		e.error(&UnsupportedValueError{v, strconv.FormatFloat(f, 'g', -1, int(bits))})
+		e.error(&UnsupportedValueError{v, strconv.FormatFloat(f, 'g', -1, 32)})
 	}
-	b := strconv.AppendFloat(e.scratch[:0], f, 'g', -1, int(bits))
-	if quoted {
-		e.WriteByte('"')
-	}
-	e.Write(b)
-	if quoted {
-		e.WriteByte('"')
-	}
+	e.WriteByte('d')
+	binary.Write(e, binary.BigEndian, float32(f))
 }
 
-var (
-	float32Encoder = (floatEncoder(32)).encode
-	float64Encoder = (floatEncoder(64)).encode
-)
+func float64Encoder(e *encodeState, v reflect.Value, _ bool) {
+	f := v.Float()
+	if math.IsInf(f, 0) || math.IsNaN(f) {
+		e.error(&UnsupportedValueError{v, strconv.FormatFloat(f, 'g', -1, 64)})
+	}
+	e.WriteByte('D')
+	binary.Write(e, binary.BigEndian, f)
+}
 
 func stringEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	if v.Type() == numberType {
@@ -533,7 +573,7 @@ func stringEncoder(e *encodeState, v reflect.Value, quoted bool) {
 		if numStr == "" {
 			numStr = "0" // Number's zero-val
 		}
-		e.WriteString(numStr)
+		e.WriteString("Si\x01" + numStr)
 		return
 	}
 	if quoted {
@@ -541,15 +581,17 @@ func stringEncoder(e *encodeState, v reflect.Value, quoted bool) {
 		if err != nil {
 			e.error(err)
 		}
+		e.WriteByte('S')
 		e.string(string(sb))
 	} else {
+		e.WriteByte('S')
 		e.string(v.String())
 	}
 }
 
 func interfaceEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	if v.IsNil() {
-		e.WriteString("null")
+		e.WriteString("N")
 		return
 	}
 	e.reflectValue(v.Elem())
@@ -566,19 +608,12 @@ type structEncoder struct {
 
 func (se *structEncoder) encode(e *encodeState, v reflect.Value, quoted bool) {
 	e.WriteByte('{')
-	first := true
 	for i, f := range se.fields {
 		fv := fieldByIndex(v, f.index)
 		if !fv.IsValid() || f.omitEmpty && isEmptyValue(fv) {
 			continue
 		}
-		if first {
-			first = false
-		} else {
-			e.WriteByte(',')
-		}
 		e.string(f.name)
-		e.WriteByte(':')
 		se.fieldEncs[i](e, fv, f.quoted)
 	}
 	e.WriteByte('}')
@@ -608,12 +643,8 @@ func (me *mapEncoder) encode(e *encodeState, v reflect.Value, _ bool) {
 	e.WriteByte('{')
 	var sv stringValues = v.MapKeys()
 	sort.Sort(sv)
-	for i, k := range sv {
-		if i > 0 {
-			e.WriteByte(',')
-		}
+	for _, k := range sv {
 		e.string(k.String())
-		e.WriteByte(':')
 		me.elemEnc(e, v.MapIndex(k), false)
 	}
 	e.WriteByte('}')
@@ -629,24 +660,12 @@ func newMapEncoder(t reflect.Type) encoderFunc {
 
 func encodeByteSlice(e *encodeState, v reflect.Value, _ bool) {
 	if v.IsNil() {
-		e.WriteString("null")
+		e.WriteString("N")
 		return
 	}
 	s := v.Bytes()
-	e.WriteByte('"')
-	if len(s) < 1024 {
-		// for small buffers, using Encode directly is much faster.
-		dst := make([]byte, base64.StdEncoding.EncodedLen(len(s)))
-		base64.StdEncoding.Encode(dst, s)
-		e.Write(dst)
-	} else {
-		// for large buffers, avoid unnecessary extra temporary
-		// buffer space.
-		enc := base64.NewEncoder(base64.StdEncoding, e)
-		enc.Write(s)
-		enc.Close()
-	}
-	e.WriteByte('"')
+	e.WriteByte('S')
+	e.stringBytes(s)
 }
 
 // sliceEncoder just wraps an arrayEncoder, checking to make sure the value isn't nil.
@@ -656,7 +675,7 @@ type sliceEncoder struct {
 
 func (se *sliceEncoder) encode(e *encodeState, v reflect.Value, _ bool) {
 	if v.IsNil() {
-		e.WriteString("null")
+		e.WriteString("N")
 		return
 	}
 	se.arrayEnc(e, v, false)
@@ -679,9 +698,6 @@ func (ae *arrayEncoder) encode(e *encodeState, v reflect.Value, _ bool) {
 	e.WriteByte('[')
 	n := v.Len()
 	for i := 0; i < n; i++ {
-		if i > 0 {
-			e.WriteByte(',')
-		}
 		ae.elemEnc(e, v.Index(i), false)
 	}
 	e.WriteByte(']')
@@ -698,7 +714,7 @@ type ptrEncoder struct {
 
 func (pe *ptrEncoder) encode(e *encodeState, v reflect.Value, quoted bool) {
 	if v.IsNil() {
-		e.WriteString("null")
+		e.WriteString("N")
 		return
 	}
 	pe.elemEnc(e, v.Elem(), quoted)
@@ -782,152 +798,16 @@ func (sv stringValues) get(i int) string   { return sv[i].String() }
 // NOTE: keep in sync with stringBytes below.
 func (e *encodeState) string(s string) (int, error) {
 	len0 := e.Len()
-	e.WriteByte('"')
-	start := 0
-	for i := 0; i < len(s); {
-		if b := s[i]; b < utf8.RuneSelf {
-			if 0x20 <= b && b != '\\' && b != '"' && b != '<' && b != '>' && b != '&' {
-				i++
-				continue
-			}
-			if start < i {
-				e.WriteString(s[start:i])
-			}
-			switch b {
-			case '\\', '"':
-				e.WriteByte('\\')
-				e.WriteByte(b)
-			case '\n':
-				e.WriteByte('\\')
-				e.WriteByte('n')
-			case '\r':
-				e.WriteByte('\\')
-				e.WriteByte('r')
-			case '\t':
-				e.WriteByte('\\')
-				e.WriteByte('t')
-			default:
-				// This encodes bytes < 0x20 except for \n and \r,
-				// as well as <, > and &. The latter are escaped because they
-				// can lead to security holes when user-controlled strings
-				// are rendered into JSON and served to some browsers.
-				e.WriteString(`\u00`)
-				e.WriteByte(hex[b>>4])
-				e.WriteByte(hex[b&0xF])
-			}
-			i++
-			start = i
-			continue
-		}
-		c, size := utf8.DecodeRuneInString(s[i:])
-		if c == utf8.RuneError && size == 1 {
-			if start < i {
-				e.WriteString(s[start:i])
-			}
-			e.WriteString(`\ufffd`)
-			i += size
-			start = i
-			continue
-		}
-		// U+2028 is LINE SEPARATOR.
-		// U+2029 is PARAGRAPH SEPARATOR.
-		// They are both technically valid characters in JSON strings,
-		// but don't work in JSONP, which has to be evaluated as JavaScript,
-		// and can lead to security holes there. It is valid JSON to
-		// escape them, so we do so unconditionally.
-		// See http://timelessrepo.com/json-isnt-a-javascript-subset for discussion.
-		if c == '\u2028' || c == '\u2029' {
-			if start < i {
-				e.WriteString(s[start:i])
-			}
-			e.WriteString(`\u202`)
-			e.WriteByte(hex[c&0xF])
-			i += size
-			start = i
-			continue
-		}
-		i += size
-	}
-	if start < len(s) {
-		e.WriteString(s[start:])
-	}
-	e.WriteByte('"')
+	intEncoder(e, reflect.ValueOf(len(s)), false)
+	e.WriteString(s)
 	return e.Len() - len0, nil
 }
 
 // NOTE: keep in sync with string above.
 func (e *encodeState) stringBytes(s []byte) (int, error) {
 	len0 := e.Len()
-	e.WriteByte('"')
-	start := 0
-	for i := 0; i < len(s); {
-		if b := s[i]; b < utf8.RuneSelf {
-			if 0x20 <= b && b != '\\' && b != '"' && b != '<' && b != '>' && b != '&' {
-				i++
-				continue
-			}
-			if start < i {
-				e.Write(s[start:i])
-			}
-			switch b {
-			case '\\', '"':
-				e.WriteByte('\\')
-				e.WriteByte(b)
-			case '\n':
-				e.WriteByte('\\')
-				e.WriteByte('n')
-			case '\r':
-				e.WriteByte('\\')
-				e.WriteByte('r')
-			case '\t':
-				e.WriteByte('\\')
-				e.WriteByte('t')
-			default:
-				// This encodes bytes < 0x20 except for \n and \r,
-				// as well as <, >, and &. The latter are escaped because they
-				// can lead to security holes when user-controlled strings
-				// are rendered into JSON and served to some browsers.
-				e.WriteString(`\u00`)
-				e.WriteByte(hex[b>>4])
-				e.WriteByte(hex[b&0xF])
-			}
-			i++
-			start = i
-			continue
-		}
-		c, size := utf8.DecodeRune(s[i:])
-		if c == utf8.RuneError && size == 1 {
-			if start < i {
-				e.Write(s[start:i])
-			}
-			e.WriteString(`\ufffd`)
-			i += size
-			start = i
-			continue
-		}
-		// U+2028 is LINE SEPARATOR.
-		// U+2029 is PARAGRAPH SEPARATOR.
-		// They are both technically valid characters in JSON strings,
-		// but don't work in JSONP, which has to be evaluated as JavaScript,
-		// and can lead to security holes there. It is valid JSON to
-		// escape them, so we do so unconditionally.
-		// See http://timelessrepo.com/json-isnt-a-javascript-subset for discussion.
-		if c == '\u2028' || c == '\u2029' {
-			if start < i {
-				e.Write(s[start:i])
-			}
-			e.WriteString(`\u202`)
-			e.WriteByte(hex[c&0xF])
-			i += size
-			start = i
-			continue
-		}
-		i += size
-	}
-	if start < len(s) {
-		e.Write(s[start:])
-	}
-	e.WriteByte('"')
+	intEncoder(e, reflect.ValueOf(len(s)), false)
+	e.Write(s)
 	return e.Len() - len0, nil
 }
 

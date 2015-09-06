@@ -190,14 +190,6 @@ func (enc *Encoder) Encode(v interface{}) error {
 		return err
 	}
 
-	// Terminate each value with a newline.
-	// This makes the output look a little nicer
-	// when debugging, and some kind of space
-	// is required if the encoded value was a number,
-	// so that the reader knows there aren't more
-	// digits coming.
-	e.WriteByte('\n')
-
 	if _, err = enc.w.Write(e.Bytes()); err != nil {
 		enc.err = err
 	}
