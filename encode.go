@@ -402,12 +402,12 @@ func newTypeEncoder(t reflect.Type, allowAddr bool) encoderFunc {
 }
 
 func invalidValueEncoder(e *encodeState, v reflect.Value, _ bool) {
-	e.WriteString("N")
+	e.WriteString("Z")
 }
 
 func marshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	if v.Kind() == reflect.Ptr && v.IsNil() {
-		e.WriteString("N")
+		e.WriteString("Z")
 		return
 	}
 	m := v.Interface().(Marshaler)
@@ -425,7 +425,7 @@ func marshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 func addrMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	va := v.Addr()
 	if va.IsNil() {
-		e.WriteString("N")
+		e.WriteString("Z")
 		return
 	}
 	m := va.Interface().(Marshaler)
@@ -442,7 +442,7 @@ func addrMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 
 func textMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	if v.Kind() == reflect.Ptr && v.IsNil() {
-		e.WriteString("N")
+		e.WriteString("Z")
 		return
 	}
 	m := v.Interface().(encoding.TextMarshaler)
@@ -459,7 +459,7 @@ func textMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 func addrTextMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	va := v.Addr()
 	if va.IsNil() {
-		e.WriteString("N")
+		e.WriteString("Z")
 		return
 	}
 	m := va.Interface().(encoding.TextMarshaler)
@@ -591,7 +591,7 @@ func stringEncoder(e *encodeState, v reflect.Value, quoted bool) {
 
 func interfaceEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	if v.IsNil() {
-		e.WriteString("N")
+		e.WriteString("Z")
 		return
 	}
 	e.reflectValue(v.Elem())
@@ -660,12 +660,15 @@ func newMapEncoder(t reflect.Type) encoderFunc {
 
 func encodeByteSlice(e *encodeState, v reflect.Value, _ bool) {
 	if v.IsNil() {
-		e.WriteString("N")
+		e.WriteString("Z")
 		return
 	}
 	s := v.Bytes()
-	e.WriteByte('S')
-	e.stringBytes(s)
+	// Represented as an array of uint8.
+	e.WriteString("[$u#")
+	intEncoder(e, reflect.ValueOf(len(s)), false)
+	e.Write(s)
+	// No closing ']' as we're using optimized format here.
 }
 
 // sliceEncoder just wraps an arrayEncoder, checking to make sure the value isn't nil.
@@ -675,7 +678,7 @@ type sliceEncoder struct {
 
 func (se *sliceEncoder) encode(e *encodeState, v reflect.Value, _ bool) {
 	if v.IsNil() {
-		e.WriteString("N")
+		e.WriteString("Z")
 		return
 	}
 	se.arrayEnc(e, v, false)
@@ -714,7 +717,7 @@ type ptrEncoder struct {
 
 func (pe *ptrEncoder) encode(e *encodeState, v reflect.Value, quoted bool) {
 	if v.IsNil() {
-		e.WriteString("N")
+		e.WriteString("Z")
 		return
 	}
 	pe.elemEnc(e, v.Elem(), quoted)

@@ -13,7 +13,14 @@ package ubjson
 // This file starts with two simple examples using the scanner
 // before diving into the scanner itself.
 
-import "strconv"
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"strconv"
+
+	"github.com/golang/glog"
+)
 
 // checkValid verifies that data is valid JSON-encoded data.
 // scan is passed in for use by checkValid to avoid an allocation.
@@ -21,7 +28,9 @@ func checkValid(data []byte, scan *scanner) error {
 	scan.reset()
 	for _, c := range data {
 		scan.bytes++
-		if scan.step(scan, int(c)) == scanError {
+		v := scan.step(scan, int(c))
+		glog.Infof("%#v -> %s", string([]byte{c}), scanToName[v])
+		if v == scanError {
 			return scan.err
 		}
 	}
@@ -38,13 +47,14 @@ func nextValue(data []byte, scan *scanner) (value, rest []byte, err error) {
 	scan.reset()
 	for i, c := range data {
 		v := scan.step(scan, int(c))
+		glog.V(2).Infof("%#v -> %s", string([]byte{c}), scanToName[v])
 		if v >= scanEndObject {
 			switch v {
 			// probe the scanner with a space to determine whether we will
 			// get scanEnd on the next character. Otherwise, if the next character
 			// is not a space, scanEndTop allocates a needless error.
 			case scanEndObject, scanEndArray:
-				if scan.step(scan, ' ') == scanEnd {
+				if scan.step(scan, 'N') == scanEnd {
 					return data[:i+1], data[i+1:], nil
 				}
 			case scanError:
@@ -91,7 +101,7 @@ type scanner struct {
 	endTop bool
 
 	// Stack of what we're in the middle of - array values, object keys, object values.
-	parseState []int
+	parseState []parseStackFrame
 
 	// Error that happened, if any.
 	err error
@@ -103,6 +113,52 @@ type scanner struct {
 
 	// total bytes consumed, updated by decoder.Decode
 	bytes int64
+
+	// Number of bytes left until the end of value.
+	bytesLeft     int
+	scanningBytes bool
+	afterBytes    func(*scanner, int) int
+
+	lenBytes []byte
+}
+
+type parseStackFrame struct {
+	container int
+	valueType byte
+	itemsLeft int
+	hasCount  bool
+}
+
+var scanToName = map[int]string{
+	scanContinue:      "continue",
+	scanBeginLiteral:  "beginLiteral",
+	scanBeginObject:   "beginObject",
+	scanObjectKey:     "objectKey",
+	scanObjectValue:   "objectValue",
+	scanEndObject:     "endObject",
+	scanBeginArray:    "beginArray",
+	scanArrayValue:    "arrayValue",
+	scanEndArray:      "endArray",
+	scanSkipSpace:     "skipSpace",
+	scanEnd:           "end",
+	scanError:         "error",
+	scanNull:          "null",
+	scanTrue:          "true",
+	scanFalse:         "false",
+	scanInt8:          "int8",
+	scanUint8:         "uint8",
+	scanInt16:         "int16",
+	scanInt32:         "int32",
+	scanInt64:         "int64",
+	scanBignum:        "bignum",
+	scanString:        "string",
+	scanFloat64:       "float64",
+	scanFloat32:       "float32",
+	scanChar:          "char",
+	scanPayload:       "payload",
+	scanEndPayload:    "endPayload",
+	scanContainerType: "containerType",
+	scanContainerLen:  "containerLen",
 }
 
 // These values are returned by the state transition functions
@@ -112,6 +168,7 @@ type scanner struct {
 // It is okay to ignore the return value of any particular
 // call to scanner.state: if one call returns scanError,
 // every subsequent call will return scanError too.
+// TODO(imax): prune unused values.
 const (
 	// Continue.
 	scanContinue     = iota // uninteresting byte
@@ -124,6 +181,24 @@ const (
 	scanArrayValue          // just finished array value
 	scanEndArray            // end array (implies scanArrayValue if possible)
 	scanSkipSpace           // space byte; can skip; known to be last "continue" result
+
+	scanNull
+	scanTrue
+	scanFalse
+	scanInt8
+	scanUint8
+	scanInt16
+	scanInt32
+	scanInt64
+	scanBignum
+	scanString
+	scanFloat64
+	scanFloat32
+	scanChar
+	scanPayload
+	scanEndPayload
+	scanContainerType
+	scanContainerLen
 
 	// Stop.
 	scanEnd   // top-level value ended *before* this byte; known to be first "stop" result
@@ -138,6 +213,7 @@ const (
 	parseObjectKey   = iota // parsing object key (before colon)
 	parseObjectValue        // parsing object value (after colon)
 	parseArrayValue         // parsing array value
+	parseObject
 )
 
 // reset prepares the scanner for use.
@@ -148,6 +224,9 @@ func (s *scanner) reset() {
 	s.err = nil
 	s.redo = false
 	s.endTop = false
+	// TODO(imax): update undo/redo().
+	s.bytesLeft = 0
+	s.scanningBytes = false
 }
 
 // eof tells the scanner that the end of input has been reached.
@@ -159,10 +238,6 @@ func (s *scanner) eof() int {
 	if s.endTop {
 		return scanEnd
 	}
-	s.step(s, ' ')
-	if s.endTop {
-		return scanEnd
-	}
 	if s.err == nil {
 		s.err = &SyntaxError{"unexpected end of JSON input", s.bytes}
 	}
@@ -171,7 +246,7 @@ func (s *scanner) eof() int {
 
 // pushParseState pushes a new parse state p onto the parse stack.
 func (s *scanner) pushParseState(p int) {
-	s.parseState = append(s.parseState, p)
+	s.parseState = append(s.parseState, parseStackFrame{container: p})
 }
 
 // popParseState pops a parse state (already obtained) off the stack
@@ -189,83 +264,98 @@ func (s *scanner) popParseState() {
 }
 
 func isSpace(c rune) bool {
-	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
+	return c == 'N'
 }
 
-// stateBeginValueOrEmpty is the state after reading `[`.
-func stateBeginValueOrEmpty(s *scanner, c int) int {
-	if c <= ' ' && isSpace(rune(c)) {
-		return scanSkipSpace
+func isType(c rune) bool {
+	switch c {
+	case 'Z', 'T', 'F', 'i', 'U', 'l', 'L', 'd', 'D', 'H', 'C', 'S', '[', '{':
+		return true
+	default:
+		return false
 	}
-	if c == ']' {
-		return stateEndValue(s, c)
-	}
-	return stateBeginValue(s, c)
 }
 
 // stateBeginValue is the state at the beginning of the input.
 func stateBeginValue(s *scanner, c int) int {
-	if c <= ' ' && isSpace(rune(c)) {
+	if isSpace(rune(c)) {
 		return scanSkipSpace
 	}
 	switch c {
 	case '{':
-		s.step = stateBeginStringOrEmpty
-		s.pushParseState(parseObjectKey)
+		s.step = stateBeginObject
+		s.pushParseState(parseObject)
 		return scanBeginObject
 	case '[':
-		s.step = stateBeginValueOrEmpty
+		s.step = stateBeginArray
 		s.pushParseState(parseArrayValue)
 		return scanBeginArray
-	case '"':
-		s.step = stateInString
-		return scanBeginLiteral
-	case '-':
-		s.step = stateNeg
-		return scanBeginLiteral
-	case '0': // beginning of 0.123
-		s.step = state0
-		return scanBeginLiteral
-	case 't': // beginning of true
-		s.step = stateT
-		return scanBeginLiteral
-	case 'f': // beginning of false
-		s.step = stateF
-		return scanBeginLiteral
-	case 'n': // beginning of null
-		s.step = stateN
-		return scanBeginLiteral
-	}
-	if '1' <= c && c <= '9' { // beginning of 1234.5
-		s.step = state1
-		return scanBeginLiteral
+	case 'S':
+		s.step = stateWantStringLen
+		return scanString
+	case 'T':
+		s.step = stateEndValue
+		return scanTrue
+	case 'F':
+		s.step = stateEndValue
+		return scanFalse
+	case 'Z':
+		s.step = stateEndValue
+		return scanNull
+	case 'i':
+		s.step = stateScanBytes
+		s.scanningBytes = true
+		s.bytesLeft = 1
+		s.afterBytes = stateEndValue
+		return scanInt8
+	case 'U':
+		s.step = stateScanBytes
+		s.scanningBytes = true
+		s.bytesLeft = 1
+		s.afterBytes = stateEndValue
+		return scanUint8
+	case 'I':
+		s.step = stateScanBytes
+		s.scanningBytes = true
+		s.bytesLeft = 2
+		s.afterBytes = stateEndValue
+		return scanInt16
+	case 'l':
+		s.step = stateScanBytes
+		s.scanningBytes = true
+		s.bytesLeft = 4
+		s.afterBytes = stateEndValue
+		return scanInt32
+	case 'L':
+		s.step = stateScanBytes
+		s.scanningBytes = true
+		s.bytesLeft = 8
+		s.afterBytes = stateEndValue
+		return scanInt64
+	case 'd':
+		s.step = stateScanBytes
+		s.scanningBytes = true
+		s.bytesLeft = 4
+		s.afterBytes = stateEndValue
+		return scanFloat32
+	case 'D':
+		s.step = stateScanBytes
+		s.scanningBytes = true
+		s.bytesLeft = 8
+		s.afterBytes = stateEndValue
+		return scanFloat64
+	case 'H':
+		// TODO(imax): parse as uint64 or big number.
+		s.step = stateWantStringLen
+		return scanBignum
+	case 'C':
+		s.step = stateScanBytes
+		s.scanningBytes = true
+		s.bytesLeft = 1
+		s.afterBytes = stateEndValue
+		return scanChar
 	}
 	return s.error(c, "looking for beginning of value")
-}
-
-// stateBeginStringOrEmpty is the state after reading `{`.
-func stateBeginStringOrEmpty(s *scanner, c int) int {
-	if c <= ' ' && isSpace(rune(c)) {
-		return scanSkipSpace
-	}
-	if c == '}' {
-		n := len(s.parseState)
-		s.parseState[n-1] = parseObjectValue
-		return stateEndValue(s, c)
-	}
-	return stateBeginString(s, c)
-}
-
-// stateBeginString is the state after reading `{"key": value,`.
-func stateBeginString(s *scanner, c int) int {
-	if c <= ' ' && isSpace(rune(c)) {
-		return scanSkipSpace
-	}
-	if c == '"' {
-		s.step = stateInString
-		return scanBeginLiteral
-	}
-	return s.error(c, "looking for beginning of object key string")
 }
 
 // stateEndValue is the state after completing a value,
@@ -278,40 +368,43 @@ func stateEndValue(s *scanner, c int) int {
 		s.endTop = true
 		return stateEndTop(s, c)
 	}
-	if c <= ' ' && isSpace(rune(c)) {
+	/*	if isSpace(rune(c)) {
 		s.step = stateEndValue
 		return scanSkipSpace
-	}
+	} */
 	ps := s.parseState[n-1]
-	switch ps {
-	case parseObjectKey:
-		if c == ':' {
-			s.parseState[n-1] = parseObjectValue
-			s.step = stateBeginValue
-			return scanObjectKey
-		}
-		return s.error(c, "after object key")
-	case parseObjectValue:
-		if c == ',' {
-			s.parseState[n-1] = parseObjectKey
-			s.step = stateBeginString
-			return scanObjectValue
-		}
-		if c == '}' {
+	switch ps.container {
+	case parseObject:
+		switch {
+		case ps.hasCount:
+			if ps.itemsLeft <= 0 {
+				s.popParseState()
+				return scanEndObject
+			}
+		case c == '}':
 			s.popParseState()
 			return scanEndObject
 		}
-		return s.error(c, "after object key:value pair")
+		return stateObjectKey(s, c)
 	case parseArrayValue:
-		if c == ',' {
-			s.step = stateBeginValue
-			return scanArrayValue
-		}
-		if c == ']' {
+		switch {
+		case ps.valueType != 0: // typed array (count is mandatory)
+			if ps.itemsLeft > 0 {
+				return stateTypedArrayItems(s, c)
+			}
+			s.popParseState()
+			return scanEndArray
+		case ps.valueType == 0 && ps.hasCount: // untyped array with count
+			if ps.itemsLeft > 0 {
+				return stateCountedArrayItems(s, c)
+			}
+			s.popParseState()
+			return scanEndArray
+		case c == ']':
 			s.popParseState()
 			return scanEndArray
 		}
-		return s.error(c, "after array element")
+		return stateBeginValue(s, c)
 	}
 	return s.error(c, "")
 }
@@ -320,83 +413,84 @@ func stateEndValue(s *scanner, c int) int {
 // such as after reading `{}` or `[1,2,3]`.
 // Only space characters should be seen now.
 func stateEndTop(s *scanner, c int) int {
-	if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+	if c != 'N' {
 		// Complain about non-space byte on next call.
 		s.error(c, "after top-level value")
 	}
 	return scanEnd
 }
 
-// stateInString is the state after reading `"`.
-func stateInString(s *scanner, c int) int {
-	if c == '"' {
-		s.step = stateEndValue
-		return scanContinue
+func stateWantStringLen(s *scanner, c int) int {
+	var r int
+	switch c {
+	case 'i':
+		s.bytesLeft = 1
+		r = scanInt8
+	case 'U':
+		s.bytesLeft = 1
+		r = scanUint8
+	case 'I':
+		s.bytesLeft = 2
+		r = scanInt16
+	case 'l':
+		s.bytesLeft = 4
+		r = scanInt32
+	case 'L':
+		s.bytesLeft = 8
+		r = scanInt64
+	default:
+		return s.error(c, "when expecting integer length")
 	}
-	if c == '\\' {
-		s.step = stateInStringEsc
-		return scanContinue
-	}
-	if c < 0x20 {
-		return s.error(c, "in string literal")
+	s.step = stateStringLen
+	s.scanningBytes = true
+	s.lenBytes = make([]byte, 0, s.bytesLeft+1)
+	s.lenBytes = append(s.lenBytes, byte(c))
+	return r
+}
+
+func stateStringLen(s *scanner, c int) int {
+	s.bytesLeft--
+	s.lenBytes = append(s.lenBytes, byte(c))
+	if s.bytesLeft <= 0 {
+		switch s.lenBytes[0] {
+		case 'i':
+			s.bytesLeft = int(s.lenBytes[1])
+		case 'U':
+			s.bytesLeft = int(s.lenBytes[1])
+		case 'I':
+			var v int16
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.bytesLeft = int(v)
+		case 'l':
+			var v int32
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.bytesLeft = int(v)
+		case 'L':
+			var v int64
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.bytesLeft = int(v)
+		default:
+			return s.error(c, "invalid len type")
+		}
+		s.step = stateScanBytes
+		s.afterBytes = stateEndValue
+		if s.bytesLeft == 0 {
+			// Shortcut for zero-length values.
+			s.scanningBytes = false
+			s.step = stateEndValue
+		}
+		return scanEndPayload
 	}
 	return scanContinue
 }
 
-// stateInStringEsc is the state after reading `"\` during a quoted string.
-func stateInStringEsc(s *scanner, c int) int {
-	switch c {
-	case 'b', 'f', 'n', 'r', 't', '\\', '/', '"':
-		s.step = stateInString
-		return scanContinue
-	}
-	if c == 'u' {
-		s.step = stateInStringEscU
-		return scanContinue
-	}
-	return s.error(c, "in string escape code")
-}
-
-// stateInStringEscU is the state after reading `"\u` during a quoted string.
-func stateInStringEscU(s *scanner, c int) int {
-	if '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F' {
-		s.step = stateInStringEscU1
-		return scanContinue
-	}
-	// numbers
-	return s.error(c, "in \\u hexadecimal character escape")
-}
-
-// stateInStringEscU1 is the state after reading `"\u1` during a quoted string.
-func stateInStringEscU1(s *scanner, c int) int {
-	if '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F' {
-		s.step = stateInStringEscU12
-		return scanContinue
-	}
-	// numbers
-	return s.error(c, "in \\u hexadecimal character escape")
-}
-
-// stateInStringEscU12 is the state after reading `"\u12` during a quoted string.
-func stateInStringEscU12(s *scanner, c int) int {
-	if '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F' {
-		s.step = stateInStringEscU123
-		return scanContinue
-	}
-	// numbers
-	return s.error(c, "in \\u hexadecimal character escape")
-}
-
-// stateInStringEscU123 is the state after reading `"\u123` during a quoted string.
-func stateInStringEscU123(s *scanner, c int) int {
-	if '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F' {
-		s.step = stateInString
-		return scanContinue
-	}
-	// numbers
-	return s.error(c, "in \\u hexadecimal character escape")
-}
-
+/*
 // stateNeg is the state after reading `-` during a number.
 func stateNeg(s *scanner, c int) int {
 	if c == '0' {
@@ -491,95 +585,442 @@ func stateE0(s *scanner, c int) int {
 	}
 	return stateEndValue(s, c)
 }
+*/
 
-// stateT is the state after reading `t`.
-func stateT(s *scanner, c int) int {
-	if c == 'r' {
-		s.step = stateTr
-		return scanContinue
+func stateScanBytes(s *scanner, c int) int {
+	s.bytesLeft--
+	if s.bytesLeft <= 0 {
+		s.scanningBytes = false
+		s.step = s.afterBytes
+		s.afterBytes = nil
+		return scanEndPayload
 	}
-	return s.error(c, "in literal true (expecting 'r')")
+	return scanContinue
 }
 
-// stateTr is the state after reading `tr`.
-func stateTr(s *scanner, c int) int {
-	if c == 'u' {
-		s.step = stateTru
-		return scanContinue
+func stateBeginArray(s *scanner, c int) int {
+	switch c {
+	case '$':
+		s.step = stateArrayType
+		s.parseState[len(s.parseState)-1].hasCount = true
+		return scanContainerType
+	case '#':
+		s.step = stateArrayLen
+		s.parseState[len(s.parseState)-1].hasCount = true
+		return scanContainerLen
+	default:
+		return stateBeginValue(s, c)
 	}
-	return s.error(c, "in literal true (expecting 'u')")
 }
 
-// stateTru is the state after reading `tru`.
-func stateTru(s *scanner, c int) int {
-	if c == 'e' {
-		s.step = stateEndValue
-		return scanContinue
+func stateArrayType(s *scanner, c int) int {
+	switch {
+	case isType(rune(c)):
+		s.parseState[len(s.parseState)-1].valueType = byte(c)
+		s.step = stateArrayHashAfterType
+		return scanEndPayload
+	default:
+		return s.error(c, "expected type tag")
 	}
-	return s.error(c, "in literal true (expecting 'e')")
 }
 
-// stateF is the state after reading `f`.
-func stateF(s *scanner, c int) int {
-	if c == 'a' {
-		s.step = stateFa
-		return scanContinue
+func stateArrayHashAfterType(s *scanner, c int) int {
+	switch c {
+	case '#':
+		s.step = stateArrayLenAfterType
+		return scanContainerLen
+	default:
+		return s.error(c, "expected #")
 	}
-	return s.error(c, "in literal false (expecting 'a')")
 }
 
-// stateFa is the state after reading `fa`.
-func stateFa(s *scanner, c int) int {
-	if c == 'l' {
-		s.step = stateFal
-		return scanContinue
+func stateArrayLenAfterType(s *scanner, c int) int {
+	var r int
+	switch c {
+	case 'i':
+		s.bytesLeft = 1
+		r = scanInt8
+	case 'U':
+		s.bytesLeft = 1
+		r = scanUint8
+	case 'I':
+		s.bytesLeft = 2
+		r = scanInt16
+	case 'l':
+		s.bytesLeft = 4
+		r = scanInt32
+	case 'L':
+		s.bytesLeft = 8
+		r = scanInt64
+	default:
+		return s.error(c, "when expecting integer length")
 	}
-	return s.error(c, "in literal false (expecting 'l')")
+	s.step = stateArrayLenBytesAfterType
+	s.scanningBytes = true
+	s.lenBytes = make([]byte, 0, s.bytesLeft+1)
+	s.lenBytes = append(s.lenBytes, byte(c))
+	return r
 }
 
-// stateFal is the state after reading `fal`.
-func stateFal(s *scanner, c int) int {
-	if c == 's' {
-		s.step = stateFals
-		return scanContinue
+func stateArrayLenBytesAfterType(s *scanner, c int) int {
+	s.bytesLeft--
+	s.lenBytes = append(s.lenBytes, byte(c))
+	if s.bytesLeft <= 0 {
+		s.scanningBytes = false
+		switch s.lenBytes[0] {
+		case 'i':
+			s.parseState[len(s.parseState)-1].itemsLeft = int(s.lenBytes[1])
+		case 'U':
+			s.parseState[len(s.parseState)-1].itemsLeft = int(s.lenBytes[1])
+		case 'I':
+			var v int16
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.parseState[len(s.parseState)-1].itemsLeft = int(v)
+		case 'l':
+			var v int32
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.parseState[len(s.parseState)-1].itemsLeft = int(v)
+		case 'L':
+			var v int64
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.parseState[len(s.parseState)-1].itemsLeft = int(v)
+		default:
+			return s.error(c, "invalid len type")
+		}
+		s.step = stateTypedArrayItems
+		return scanEndPayload
 	}
-	return s.error(c, "in literal false (expecting 's')")
+	return scanContinue
 }
 
-// stateFals is the state after reading `fals`.
-func stateFals(s *scanner, c int) int {
-	if c == 'e' {
-		s.step = stateEndValue
-		return scanContinue
-	}
-	return s.error(c, "in literal false (expecting 'e')")
+func stateTypedArrayItems(s *scanner, c int) int {
+	s.parseState[len(s.parseState)-1].itemsLeft--
+	return stateBeginValue(s, int(s.parseState[len(s.parseState)-1].valueType))
 }
 
-// stateN is the state after reading `n`.
-func stateN(s *scanner, c int) int {
-	if c == 'u' {
-		s.step = stateNu
-		return scanContinue
+func stateArrayLen(s *scanner, c int) int {
+	var r int
+	switch c {
+	case 'i':
+		s.bytesLeft = 1
+		r = scanInt8
+	case 'U':
+		s.bytesLeft = 1
+		r = scanUint8
+	case 'I':
+		s.bytesLeft = 2
+		r = scanInt16
+	case 'l':
+		s.bytesLeft = 4
+		r = scanInt32
+	case 'L':
+		s.bytesLeft = 8
+		r = scanInt64
+	default:
+		return s.error(c, "when expecting integer length")
 	}
-	return s.error(c, "in literal null (expecting 'u')")
+	s.step = stateArrayLenBytes
+	s.scanningBytes = true
+	s.lenBytes = make([]byte, 0, s.bytesLeft+1)
+	s.lenBytes = append(s.lenBytes, byte(c))
+	return r
 }
 
-// stateNu is the state after reading `nu`.
-func stateNu(s *scanner, c int) int {
-	if c == 'l' {
-		s.step = stateNul
-		return scanContinue
+func stateArrayLenBytes(s *scanner, c int) int {
+	s.bytesLeft--
+	s.lenBytes = append(s.lenBytes, byte(c))
+	if s.bytesLeft <= 0 {
+		s.scanningBytes = false
+		switch s.lenBytes[0] {
+		case 'i':
+			s.parseState[len(s.parseState)-1].itemsLeft = int(s.lenBytes[1])
+		case 'U':
+			s.parseState[len(s.parseState)-1].itemsLeft = int(s.lenBytes[1])
+		case 'I':
+			var v int16
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.parseState[len(s.parseState)-1].itemsLeft = int(v)
+		case 'l':
+			var v int32
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.parseState[len(s.parseState)-1].itemsLeft = int(v)
+		case 'L':
+			var v int64
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.parseState[len(s.parseState)-1].itemsLeft = int(v)
+		default:
+			return s.error(c, "invalid len type")
+		}
+		s.step = stateCountedArrayItems
+		return scanEndPayload
 	}
-	return s.error(c, "in literal null (expecting 'l')")
+	return scanContinue
 }
 
-// stateNul is the state after reading `nul`.
-func stateNul(s *scanner, c int) int {
-	if c == 'l' {
-		s.step = stateEndValue
-		return scanContinue
+func stateCountedArrayItems(s *scanner, c int) int {
+	s.parseState[len(s.parseState)-1].itemsLeft--
+	return stateBeginValue(s, c)
+}
+
+func stateBeginObject(s *scanner, c int) int {
+	switch c {
+	case '$':
+		s.step = stateObjectType
+		s.parseState[len(s.parseState)-1].hasCount = true
+		return scanContainerType
+	case '#':
+		s.step = stateObjectLen
+		s.parseState[len(s.parseState)-1].hasCount = true
+		return scanContainerLen
+	default:
+		return stateObjectKey(s, c)
 	}
-	return s.error(c, "in literal null (expecting 'l')")
+}
+
+func stateObjectType(s *scanner, c int) int {
+	switch {
+	case isType(rune(c)):
+		s.parseState[len(s.parseState)-1].valueType = byte(c)
+		s.step = stateObjectHashAfterType
+		return scanEndPayload
+	default:
+		return s.error(c, "expected type tag")
+	}
+}
+
+func stateObjectHashAfterType(s *scanner, c int) int {
+	switch c {
+	case '#':
+		s.step = stateObjectLenAfterType
+		return scanContainerLen
+	default:
+		return s.error(c, "expected #")
+	}
+}
+
+func stateObjectLenAfterType(s *scanner, c int) int {
+	var r int
+	switch c {
+	case 'i':
+		s.bytesLeft = 1
+		r = scanInt8
+	case 'U':
+		s.bytesLeft = 1
+		r = scanUint8
+	case 'I':
+		s.bytesLeft = 2
+		r = scanInt16
+	case 'l':
+		s.bytesLeft = 4
+		r = scanInt32
+	case 'L':
+		s.bytesLeft = 8
+		r = scanInt64
+	default:
+		return s.error(c, "when expecting integer length")
+	}
+	s.step = stateObjectLenBytesAfterType
+	s.scanningBytes = true
+	s.lenBytes = make([]byte, 0, s.bytesLeft+1)
+	s.lenBytes = append(s.lenBytes, byte(c))
+	return r
+}
+
+func stateObjectLenBytesAfterType(s *scanner, c int) int {
+	s.bytesLeft--
+	s.lenBytes = append(s.lenBytes, byte(c))
+	if s.bytesLeft <= 0 {
+		s.scanningBytes = false
+		switch s.lenBytes[0] {
+		case 'i':
+			s.parseState[len(s.parseState)-1].itemsLeft = int(s.lenBytes[1])
+		case 'U':
+			s.parseState[len(s.parseState)-1].itemsLeft = int(s.lenBytes[1])
+		case 'I':
+			var v int16
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.parseState[len(s.parseState)-1].itemsLeft = int(v)
+		case 'l':
+			var v int32
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.parseState[len(s.parseState)-1].itemsLeft = int(v)
+		case 'L':
+			var v int64
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.parseState[len(s.parseState)-1].itemsLeft = int(v)
+		default:
+			return s.error(c, "invalid len type")
+		}
+		s.step = stateObjectKey
+		return scanEndPayload
+	}
+	return scanContinue
+}
+
+func stateObjectLen(s *scanner, c int) int {
+	var r int
+	switch c {
+	case 'i':
+		s.bytesLeft = 1
+		r = scanInt8
+	case 'U':
+		s.bytesLeft = 1
+		r = scanUint8
+	case 'I':
+		s.bytesLeft = 2
+		r = scanInt16
+	case 'l':
+		s.bytesLeft = 4
+		r = scanInt32
+	case 'L':
+		s.bytesLeft = 8
+		r = scanInt64
+	default:
+		return s.error(c, "when expecting integer length")
+	}
+	s.step = stateObjectLenBytes
+	s.scanningBytes = true
+	s.lenBytes = make([]byte, 0, s.bytesLeft+1)
+	s.lenBytes = append(s.lenBytes, byte(c))
+	return r
+}
+
+func stateObjectLenBytes(s *scanner, c int) int {
+	s.bytesLeft--
+	s.lenBytes = append(s.lenBytes, byte(c))
+	if s.bytesLeft <= 0 {
+		s.scanningBytes = false
+		switch s.lenBytes[0] {
+		case 'i':
+			s.parseState[len(s.parseState)-1].itemsLeft = int(s.lenBytes[1])
+		case 'U':
+			s.parseState[len(s.parseState)-1].itemsLeft = int(s.lenBytes[1])
+		case 'I':
+			var v int16
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.parseState[len(s.parseState)-1].itemsLeft = int(v)
+		case 'l':
+			var v int32
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.parseState[len(s.parseState)-1].itemsLeft = int(v)
+		case 'L':
+			var v int64
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.parseState[len(s.parseState)-1].itemsLeft = int(v)
+		default:
+			return s.error(c, "invalid len type")
+		}
+		s.step = stateObjectKey
+		return scanEndPayload
+	}
+	return scanContinue
+}
+
+func stateObjectKey(s *scanner, c int) int {
+	s.parseState[len(s.parseState)-1].itemsLeft--
+	var r int
+	switch c {
+	case 'i':
+		s.bytesLeft = 1
+		r = scanInt8
+	case 'U':
+		s.bytesLeft = 1
+		r = scanUint8
+	case 'I':
+		s.bytesLeft = 2
+		r = scanInt16
+	case 'l':
+		s.bytesLeft = 4
+		r = scanInt32
+	case 'L':
+		s.bytesLeft = 8
+		r = scanInt64
+	default:
+		return s.error(c, "when expecting integer length")
+	}
+	s.step = stateObjectKeyLen
+	s.scanningBytes = true
+	s.lenBytes = make([]byte, 0, s.bytesLeft+1)
+	s.lenBytes = append(s.lenBytes, byte(c))
+	return r
+}
+
+func stateObjectKeyLen(s *scanner, c int) int {
+	s.bytesLeft--
+	s.lenBytes = append(s.lenBytes, byte(c))
+	if s.bytesLeft <= 0 {
+		switch s.lenBytes[0] {
+		case 'i':
+			s.bytesLeft = int(s.lenBytes[1])
+		case 'U':
+			s.bytesLeft = int(s.lenBytes[1])
+		case 'I':
+			var v int16
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.bytesLeft = int(v)
+		case 'l':
+			var v int32
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.bytesLeft = int(v)
+		case 'L':
+			var v int64
+			if err := binary.Read(bytes.NewBuffer(s.lenBytes[1:]), binary.BigEndian, &v); err != nil {
+				return s.error(c, fmt.Sprintf("invalid length: %s", err))
+			}
+			s.bytesLeft = int(v)
+		default:
+			return s.error(c, "invalid len type")
+		}
+		s.step = stateObjectKeyName
+		return scanEndPayload
+	}
+	return scanContinue
+}
+
+func stateObjectKeyName(s *scanner, c int) int {
+	s.bytesLeft--
+	if s.bytesLeft <= 0 {
+		s.scanningBytes = false
+		s.step = stateObjectValue
+		return scanEndPayload
+	}
+	return scanContinue
+}
+
+func stateObjectValue(s *scanner, c int) int {
+	if t := s.parseState[len(s.parseState)-1].valueType; t != 0 {
+		stateBeginValue(s, int(t))
+		return s.step(s, c)
+	}
+	return stateBeginValue(s, c)
 }
 
 // stateError is the state after reaching a syntax error,
