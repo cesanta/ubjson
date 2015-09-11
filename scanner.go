@@ -117,7 +117,7 @@ type scanner struct {
 	// Number of bytes left until the end of value.
 	bytesLeft     int
 	scanningBytes bool
-	afterBytes    func(*scanner, int) int
+	afterBytes    func(*scanner)
 
 	lenBytes []byte
 }
@@ -216,6 +216,43 @@ const (
 	parseObject
 )
 
+func scanTypeFromByte(c byte) (int, error) {
+	switch c {
+	case 'Z':
+		return scanNull, nil
+	case 'T':
+		return scanTrue, nil
+	case 'F':
+		return scanFalse, nil
+	case 'i':
+		return scanInt8, nil
+	case 'U':
+		return scanUint8, nil
+	case 'I':
+		return scanInt16, nil
+	case 'l':
+		return scanInt32, nil
+	case 'L':
+		return scanInt64, nil
+	case 'd':
+		return scanFloat32, nil
+	case 'D':
+		return scanFloat64, nil
+	case 'H':
+		return scanBignum, nil
+	case 'C':
+		return scanChar, nil
+	case 'S':
+		return scanString, nil
+	case '[':
+		return scanBeginArray, nil
+	case '{':
+		return scanBeginObject, nil
+	default:
+		return -1, fmt.Errorf("unknown type tag: %#v", string([]byte{c}))
+	}
+}
+
 // reset prepares the scanner for use.
 // It must be called before calling s.step.
 func (s *scanner) reset() {
@@ -263,13 +300,29 @@ func (s *scanner) popParseState() {
 	}
 }
 
+func endValue(s *scanner) {
+	s.step = stateEndValue
+	if len(s.parseState) == 0 {
+		// We're done with scanning one top-level value.
+		s.endTop = true
+		s.step = stateEndTop
+	}
+	for len(s.parseState) > 0 {
+		ps := s.parseState[len(s.parseState)-1]
+		if !ps.hasCount || ps.itemsLeft > 0 {
+			break
+		}
+		s.popParseState()
+	}
+}
+
 func isSpace(c rune) bool {
 	return c == 'N'
 }
 
 func isType(c rune) bool {
 	switch c {
-	case 'Z', 'T', 'F', 'i', 'U', 'l', 'L', 'd', 'D', 'H', 'C', 'S', '[', '{':
+	case 'Z', 'T', 'F', 'i', 'U', 'I', 'l', 'L', 'd', 'D', 'H', 'C', 'S', '[', '{':
 		return true
 	default:
 		return false
@@ -294,55 +347,55 @@ func stateBeginValue(s *scanner, c int) int {
 		s.step = stateWantStringLen
 		return scanString
 	case 'T':
-		s.step = stateEndValue
+		endValue(s)
 		return scanTrue
 	case 'F':
-		s.step = stateEndValue
+		endValue(s)
 		return scanFalse
 	case 'Z':
-		s.step = stateEndValue
+		endValue(s)
 		return scanNull
 	case 'i':
 		s.step = stateScanBytes
 		s.scanningBytes = true
 		s.bytesLeft = 1
-		s.afterBytes = stateEndValue
+		s.afterBytes = endValue
 		return scanInt8
 	case 'U':
 		s.step = stateScanBytes
 		s.scanningBytes = true
 		s.bytesLeft = 1
-		s.afterBytes = stateEndValue
+		s.afterBytes = endValue
 		return scanUint8
 	case 'I':
 		s.step = stateScanBytes
 		s.scanningBytes = true
 		s.bytesLeft = 2
-		s.afterBytes = stateEndValue
+		s.afterBytes = endValue
 		return scanInt16
 	case 'l':
 		s.step = stateScanBytes
 		s.scanningBytes = true
 		s.bytesLeft = 4
-		s.afterBytes = stateEndValue
+		s.afterBytes = endValue
 		return scanInt32
 	case 'L':
 		s.step = stateScanBytes
 		s.scanningBytes = true
 		s.bytesLeft = 8
-		s.afterBytes = stateEndValue
+		s.afterBytes = endValue
 		return scanInt64
 	case 'd':
 		s.step = stateScanBytes
 		s.scanningBytes = true
 		s.bytesLeft = 4
-		s.afterBytes = stateEndValue
+		s.afterBytes = endValue
 		return scanFloat32
 	case 'D':
 		s.step = stateScanBytes
 		s.scanningBytes = true
 		s.bytesLeft = 8
-		s.afterBytes = stateEndValue
+		s.afterBytes = endValue
 		return scanFloat64
 	case 'H':
 		// TODO(imax): parse as uint64 or big number.
@@ -352,7 +405,7 @@ func stateBeginValue(s *scanner, c int) int {
 		s.step = stateScanBytes
 		s.scanningBytes = true
 		s.bytesLeft = 1
-		s.afterBytes = stateEndValue
+		s.afterBytes = endValue
 		return scanChar
 	}
 	return s.error(c, "looking for beginning of value")
@@ -368,10 +421,6 @@ func stateEndValue(s *scanner, c int) int {
 		s.endTop = true
 		return stateEndTop(s, c)
 	}
-	/*	if isSpace(rune(c)) {
-		s.step = stateEndValue
-		return scanSkipSpace
-	} */
 	ps := s.parseState[n-1]
 	switch ps.container {
 	case parseObject:
@@ -479,7 +528,7 @@ func stateStringLen(s *scanner, c int) int {
 			return s.error(c, "invalid len type")
 		}
 		s.step = stateScanBytes
-		s.afterBytes = stateEndValue
+		s.afterBytes = endValue
 		if s.bytesLeft == 0 {
 			// Shortcut for zero-length values.
 			s.scanningBytes = false
@@ -591,7 +640,7 @@ func stateScanBytes(s *scanner, c int) int {
 	s.bytesLeft--
 	if s.bytesLeft <= 0 {
 		s.scanningBytes = false
-		s.step = s.afterBytes
+		s.afterBytes(s)
 		s.afterBytes = nil
 		return scanEndPayload
 	}
@@ -701,7 +750,8 @@ func stateArrayLenBytesAfterType(s *scanner, c int) int {
 
 func stateTypedArrayItems(s *scanner, c int) int {
 	s.parseState[len(s.parseState)-1].itemsLeft--
-	return stateBeginValue(s, int(s.parseState[len(s.parseState)-1].valueType))
+	stateBeginValue(s, int(s.parseState[len(s.parseState)-1].valueType))
+	return s.step(s, c)
 }
 
 func stateArrayLen(s *scanner, c int) int {

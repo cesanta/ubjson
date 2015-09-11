@@ -457,7 +457,18 @@ func (d *decodeState) array(v reflect.Value) {
 		return
 	}
 	if op == scanContainerType {
-		itemType = d.scanOnce()
+		switch d.scanOnce() {
+		case scanEndPayload:
+			t, err := scanTypeFromByte(d.data[d.off-1])
+			if err != nil {
+				d.error(err)
+				return
+			}
+			itemType = t
+		default:
+			d.error(errPhase)
+			return
+		}
 		hasType = true
 		op = d.scanOnce()
 		if op != scanContainerLen {
@@ -612,7 +623,18 @@ func (d *decodeState) object(v reflect.Value) {
 		return
 	}
 	if op == scanContainerType {
-		itemType = d.scanOnce()
+		switch d.scanOnce() {
+		case scanEndPayload:
+			t, err := scanTypeFromByte(d.data[d.off-1])
+			if err != nil {
+				d.error(err)
+				return
+			}
+			itemType = t
+		default:
+			d.error(errPhase)
+			return
+		}
 		hasType = true
 		op = d.scanOnce()
 		if op != scanContainerLen {
@@ -947,7 +969,18 @@ func (d *decodeState) arrayInterface() []interface{} {
 		return v
 	}
 	if op == scanContainerType {
-		itemType = d.scanOnce()
+		switch d.scanOnce() {
+		case scanEndPayload:
+			t, err := scanTypeFromByte(d.data[d.off-1])
+			if err != nil {
+				d.error(err)
+				return nil
+			}
+			itemType = t
+		default:
+			d.error(errPhase)
+			return nil
+		}
 		hasType = true
 		op = d.scanOnce()
 		if op != scanContainerLen {
@@ -972,9 +1005,9 @@ func (d *decodeState) arrayInterface() []interface{} {
 	if hasCount {
 		for ; itemCount > 0; itemCount-- {
 			if hasType {
-				v = append(v, d.valueInterface(d.scanOnce()))
-			} else {
 				v = append(v, d.valueInterface(itemType))
+			} else {
+				v = append(v, d.valueInterface(d.scanOnce()))
 			}
 		}
 	} else {
@@ -1002,7 +1035,18 @@ func (d *decodeState) objectInterface() map[string]interface{} {
 		return m
 	}
 	if op == scanContainerType {
-		itemType = d.scanOnce()
+		switch d.scanOnce() {
+		case scanEndPayload:
+			t, err := scanTypeFromByte(d.data[d.off-1])
+			if err != nil {
+				d.error(err)
+				return nil
+			}
+			itemType = t
+		default:
+			d.error(errPhase)
+			return nil
+		}
 		hasType = true
 		op = d.scanOnce()
 		if op != scanContainerLen {
@@ -1032,10 +1076,9 @@ func (d *decodeState) objectInterface() map[string]interface{} {
 				return nil
 			}
 			if hasType {
-				op := d.scanOnce()
-				m[key] = d.valueInterface(op)
-			} else {
 				m[key] = d.valueInterface(itemType)
+			} else {
+				m[key] = d.valueInterface(d.scanOnce())
 			}
 		}
 	} else {
