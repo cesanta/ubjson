@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -211,22 +212,13 @@ func (d *decodeState) saveError(err error) {
 // next cuts off and returns the next full JSON value in d.data[d.off:].
 // The next value is known to be an object or array, not a literal.
 func (d *decodeState) next() []byte {
-	c := d.data[d.off]
-	item, rest, err := nextValue(d.data[d.off:], &d.nextscan)
+	item, _, err := nextValue(d.data[d.off:], &d.nextscan)
 	if err != nil {
 		d.error(err)
 	}
-	d.off = len(d.data) - len(rest)
-
-	// Our scanner has seen the opening brace/bracket
-	// and thinks we're still in the middle of the object.
-	// invent a closing brace/bracket to get it out.
-	if c == '{' {
-		d.scan.step(&d.scan, '}')
-	} else {
-		d.scan.step(&d.scan, ']')
+	for range item {
+		d.scanOnce()
 	}
-
 	return item
 }
 
@@ -240,6 +232,9 @@ func (d *decodeState) scanOnce() int {
 		d.off++
 		r = d.scan.step(&d.scan, c)
 		glog.V(2).Infof("%#v -> %s", string([]byte{byte(c)}), scanToName[r])
+		if r == scanError {
+			glog.V(2).Infof("Error: %s\nStack: %+#v", d.scan.err, d.scan.parseState)
+		}
 	}
 	return r
 }
@@ -412,8 +407,20 @@ func (d *decodeState) array(v reflect.Value) {
 	u, ut, pv := d.indirect(v, false)
 	if u != nil {
 		d.off--
-		// TODO(imax): parse array into interface, serialize as JSON and feed to UnmarshalJSON.
-		err := u.UnmarshalJSON(d.next())
+		d.scan.undo(scanBeginArray)
+		b := d.next()
+		glog.V(2).Infof("Object bytes: %#v", string(b))
+		var v interface{}
+		if err := Unmarshal(b, &v); err != nil {
+			d.error(err)
+			return
+		}
+		b, err := json.Marshal(&v)
+		if err != nil {
+			d.error(err)
+			return
+		}
+		err = u.UnmarshalJSON(b)
 		if err != nil {
 			d.error(err)
 		}
@@ -562,8 +569,6 @@ func (d *decodeState) array(v reflect.Value) {
 	}
 }
 
-var nullLiteral = []byte("null")
-
 // object consumes an object from d.data[d.off-1:], decoding into the value v.
 // the first byte ('{') of the object has been read already.
 func (d *decodeState) object(v reflect.Value) {
@@ -571,7 +576,20 @@ func (d *decodeState) object(v reflect.Value) {
 	u, ut, pv := d.indirect(v, false)
 	if u != nil {
 		d.off--
-		err := u.UnmarshalJSON(d.next())
+		d.scan.undo(scanBeginObject)
+		b := d.next()
+		glog.V(2).Infof("Object bytes: %#v", string(b))
+		var v interface{}
+		if err := Unmarshal(b, &v); err != nil {
+			d.error(err)
+			return
+		}
+		b, err := json.Marshal(&v)
+		if err != nil {
+			d.error(err)
+			return
+		}
+		err = u.UnmarshalJSON(b)
 		if err != nil {
 			d.error(err)
 		}
@@ -750,8 +768,20 @@ func (d *decodeState) literal(v reflect.Value, op int) {
 	wantptr := op == scanNull // null
 	u, ut, pv := d.indirect(v, wantptr)
 	if u != nil {
-		// TODO(imax): marshal into JSON and pass it to UnmarshalJSON.
-		err := u.UnmarshalJSON(nil)
+		// TODO(imax): scanner state is not preserved properly.
+		d.off--
+		b := d.next()
+		var v interface{}
+		if err := Unmarshal(b, &v); err != nil {
+			d.error(err)
+			return
+		}
+		b, err := json.Marshal(&v)
+		if err != nil {
+			d.error(err)
+			return
+		}
+		err = u.UnmarshalJSON(b)
 		if err != nil {
 			d.error(err)
 		}

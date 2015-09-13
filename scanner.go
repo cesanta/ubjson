@@ -54,7 +54,7 @@ func nextValue(data []byte, scan *scanner) (value, rest []byte, err error) {
 			// get scanEnd on the next character. Otherwise, if the next character
 			// is not a space, scanEndTop allocates a needless error.
 			case scanEndObject, scanEndArray:
-				if scan.step(scan, 'N') == scanEnd {
+				if len(scan.parseState) == 0 {
 					return data[:i+1], data[i+1:], nil
 				}
 			case scanError:
