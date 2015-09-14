@@ -131,13 +131,9 @@ type parseStackFrame struct {
 
 var scanToName = map[int]string{
 	scanContinue:      "continue",
-	scanBeginLiteral:  "beginLiteral",
 	scanBeginObject:   "beginObject",
-	scanObjectKey:     "objectKey",
-	scanObjectValue:   "objectValue",
 	scanEndObject:     "endObject",
 	scanBeginArray:    "beginArray",
-	scanArrayValue:    "arrayValue",
 	scanEndArray:      "endArray",
 	scanSkipSpace:     "skipSpace",
 	scanEnd:           "end",
@@ -168,19 +164,14 @@ var scanToName = map[int]string{
 // It is okay to ignore the return value of any particular
 // call to scanner.state: if one call returns scanError,
 // every subsequent call will return scanError too.
-// TODO(imax): prune unused values.
 const (
 	// Continue.
-	scanContinue     = iota // uninteresting byte
-	scanBeginLiteral        // end implied by next result != scanContinue
-	scanBeginObject         // begin object
-	scanObjectKey           // just finished object key (string)
-	scanObjectValue         // just finished non-last object value
-	scanEndObject           // end object (implies scanObjectValue if possible)
-	scanBeginArray          // begin array
-	scanArrayValue          // just finished array value
-	scanEndArray            // end array (implies scanArrayValue if possible)
-	scanSkipSpace           // space byte; can skip; known to be last "continue" result
+	scanContinue    = iota // uninteresting byte
+	scanBeginObject        // begin object
+	scanEndObject          // end object (implies scanObjectValue if possible)
+	scanBeginArray         // begin array
+	scanEndArray           // end array (implies scanArrayValue if possible)
+	scanSkipSpace          // space byte; can skip; known to be last "continue" result
 
 	scanNull
 	scanTrue
