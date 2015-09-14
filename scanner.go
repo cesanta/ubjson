@@ -532,7 +532,7 @@ func stateStringLen(s *scanner, c int) int {
 		if s.bytesLeft == 0 {
 			// Shortcut for zero-length values.
 			s.scanningBytes = false
-			s.step = stateEndValue
+			endValue(s)
 		}
 		return scanEndPayload
 	}
@@ -657,6 +657,10 @@ func stateBeginArray(s *scanner, c int) int {
 		s.step = stateArrayLen
 		s.parseState[len(s.parseState)-1].hasCount = true
 		return scanContainerLen
+	case ']':
+		endValue(s)
+		s.popParseState()
+		return scanEndArray
 	default:
 		return stateBeginValue(s, c)
 	}
@@ -742,7 +746,11 @@ func stateArrayLenBytesAfterType(s *scanner, c int) int {
 		default:
 			return s.error(c, "invalid len type")
 		}
-		s.step = stateTypedArrayItems
+		if s.parseState[len(s.parseState)-1].itemsLeft == 0 {
+			endValue(s)
+		} else {
+			s.step = stateTypedArrayItems
+		}
 		return scanEndPayload
 	}
 	return scanContinue
@@ -813,7 +821,11 @@ func stateArrayLenBytes(s *scanner, c int) int {
 		default:
 			return s.error(c, "invalid len type")
 		}
-		s.step = stateCountedArrayItems
+		if s.parseState[len(s.parseState)-1].itemsLeft == 0 {
+			endValue(s)
+		} else {
+			s.step = stateCountedArrayItems
+		}
 		return scanEndPayload
 	}
 	return scanContinue
@@ -834,6 +846,10 @@ func stateBeginObject(s *scanner, c int) int {
 		s.step = stateObjectLen
 		s.parseState[len(s.parseState)-1].hasCount = true
 		return scanContainerLen
+	case '}':
+		endValue(s)
+		s.popParseState()
+		return scanEndObject
 	default:
 		return stateObjectKey(s, c)
 	}
@@ -919,7 +935,11 @@ func stateObjectLenBytesAfterType(s *scanner, c int) int {
 		default:
 			return s.error(c, "invalid len type")
 		}
-		s.step = stateObjectKey
+		if s.parseState[len(s.parseState)-1].itemsLeft == 0 {
+			endValue(s)
+		} else {
+			s.step = stateObjectKey
+		}
 		return scanEndPayload
 	}
 	return scanContinue
@@ -984,7 +1004,11 @@ func stateObjectLenBytes(s *scanner, c int) int {
 		default:
 			return s.error(c, "invalid len type")
 		}
-		s.step = stateObjectKey
+		if s.parseState[len(s.parseState)-1].itemsLeft == 0 {
+			endValue(s)
+		} else {
+			s.step = stateObjectKey
+		}
 		return scanEndPayload
 	}
 	return scanContinue
@@ -1049,7 +1073,11 @@ func stateObjectKeyLen(s *scanner, c int) int {
 		default:
 			return s.error(c, "invalid len type")
 		}
-		s.step = stateObjectKeyName
+		if s.bytesLeft == 0 {
+			s.step = stateObjectValue
+		} else {
+			s.step = stateObjectKeyName
+		}
 		return scanEndPayload
 	}
 	return scanContinue

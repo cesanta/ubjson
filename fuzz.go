@@ -18,7 +18,7 @@ func Fuzz(data []byte) int {
 		panic(err)
 	}
 	if err := Unmarshal(b, &v); err != nil {
-		fmt.Println("Failed to unmarshal")
+		fmt.Printf("Failed to unmarshal %#v\n", string(b))
 		panic(err)
 	}
 	return 0

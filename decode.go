@@ -885,6 +885,12 @@ func (d *decodeState) literal(v reflect.Value, op int) {
 				break
 			}
 			v.SetUint(uint64(n))
+		case reflect.Float32, reflect.Float64:
+			if v.OverflowFloat(float64(n)) {
+				d.saveError(&UnmarshalTypeError{"number ", v.Type(), int64(d.off)})
+				break
+			}
+			v.SetFloat(float64(n))
 		}
 	case scanFloat32:
 		b, err := d.scanPayload()
@@ -897,7 +903,36 @@ func (d *decodeState) literal(v reflect.Value, op int) {
 			d.error(err)
 			return
 		}
-		v.SetFloat(float64(n))
+		switch v.Kind() {
+		default:
+			d.error(&UnmarshalTypeError{"number", v.Type(), int64(d.off)})
+		case reflect.Interface:
+			if v.NumMethod() != 0 {
+				d.saveError(&UnmarshalTypeError{"number", v.Type(), int64(d.off)})
+				break
+			}
+			v.Set(reflect.ValueOf(n))
+
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			if v.OverflowInt(int64(n)) {
+				d.saveError(&UnmarshalTypeError{"number", v.Type(), int64(d.off)})
+				break
+			}
+			v.SetInt(int64(n))
+
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			if v.OverflowUint(uint64(n)) {
+				d.saveError(&UnmarshalTypeError{"number ", v.Type(), int64(d.off)})
+				break
+			}
+			v.SetUint(uint64(n))
+		case reflect.Float32, reflect.Float64:
+			if v.OverflowFloat(float64(n)) {
+				d.saveError(&UnmarshalTypeError{"number ", v.Type(), int64(d.off)})
+				break
+			}
+			v.SetFloat(float64(n))
+		}
 	case scanFloat64:
 		b, err := d.scanPayload()
 		if err != nil {
@@ -909,7 +944,36 @@ func (d *decodeState) literal(v reflect.Value, op int) {
 			d.error(err)
 			return
 		}
-		v.SetFloat(n)
+		switch v.Kind() {
+		default:
+			d.error(&UnmarshalTypeError{"number", v.Type(), int64(d.off)})
+		case reflect.Interface:
+			if v.NumMethod() != 0 {
+				d.saveError(&UnmarshalTypeError{"number", v.Type(), int64(d.off)})
+				break
+			}
+			v.Set(reflect.ValueOf(n))
+
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			if v.OverflowInt(int64(n)) {
+				d.saveError(&UnmarshalTypeError{"number", v.Type(), int64(d.off)})
+				break
+			}
+			v.SetInt(int64(n))
+
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			if v.OverflowUint(uint64(n)) {
+				d.saveError(&UnmarshalTypeError{"number ", v.Type(), int64(d.off)})
+				break
+			}
+			v.SetUint(uint64(n))
+		case reflect.Float32, reflect.Float64:
+			if v.OverflowFloat(n) {
+				d.saveError(&UnmarshalTypeError{"number ", v.Type(), int64(d.off)})
+				break
+			}
+			v.SetFloat(n)
+		}
 	}
 }
 
