@@ -551,7 +551,7 @@ func uintEncoder(e *encodeState, v reflect.Value, _ bool) {
 	}
 	switch t {
 	case reflect.Uint8:
-		e.WriteByte('u')
+		e.WriteByte('U')
 		binary.Write(e, binary.BigEndian, uint8(v.Uint()))
 	case reflect.Int64:
 		e.WriteByte('L')
@@ -590,7 +590,8 @@ func stringEncoder(e *encodeState, v reflect.Value, quoted bool) {
 		if numStr == "" {
 			numStr = "0" // Number's zero-val
 		}
-		e.WriteString("Si\x01" + numStr)
+		e.WriteByte('S')
+		e.string(numStr)
 		return
 	}
 	if quoted {
@@ -682,7 +683,7 @@ func encodeByteSlice(e *encodeState, v reflect.Value, _ bool) {
 	}
 	s := v.Bytes()
 	// Represented as an array of uint8.
-	e.WriteString("[$u#")
+	e.WriteString("[$U#")
 	intEncoder(e, reflect.ValueOf(len(s)), false)
 	e.Write(s)
 	// No closing ']' as we're using optimized format here.
