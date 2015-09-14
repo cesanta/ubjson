@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"encoding"
 	"encoding/binary"
+	"encoding/json"
 	"math"
 	"reflect"
 	"runtime"
@@ -413,9 +414,17 @@ func marshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	m := v.Interface().(Marshaler)
 	b, err := m.MarshalJSON()
 	if err == nil {
-		// TODO(imax): parse into interface{} and serialize again.
-		// copy JSON into buffer, checking validity.
-		err = compact(&e.Buffer, b, true)
+		var v interface{}
+		if err := json.Unmarshal(b, &v); err != nil {
+			e.error(err)
+			return
+		}
+		b, err = Marshal(&v)
+		if err != nil {
+			e.error(err)
+			return
+		}
+		e.Buffer.Write(b)
 	}
 	if err != nil {
 		e.error(&MarshalerError{v.Type(), err})
@@ -431,9 +440,17 @@ func addrMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	m := va.Interface().(Marshaler)
 	b, err := m.MarshalJSON()
 	if err == nil {
-		// TODO(imax): parse into interface{} and serialize again.
-		// copy JSON into buffer, checking validity.
-		err = compact(&e.Buffer, b, true)
+		var v interface{}
+		if err := json.Unmarshal(b, &v); err != nil {
+			e.error(err)
+			return
+		}
+		b, err = Marshal(&v)
+		if err != nil {
+			e.error(err)
+			return
+		}
+		e.Buffer.Write(b)
 	}
 	if err != nil {
 		e.error(&MarshalerError{v.Type(), err})
