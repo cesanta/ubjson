@@ -231,9 +231,9 @@ func (d *decodeState) scanOnce() int {
 		c := int(d.data[d.off])
 		d.off++
 		r = d.scan.step(&d.scan, c)
-		glog.V(2).Infof("%#v -> %s", string([]byte{byte(c)}), scanToName[r])
+		glog.V(3).Infof("%#v -> %s", string([]byte{byte(c)}), scanToName[r])
 		if r == scanError {
-			glog.V(2).Infof("Error: %s\nStack: %+#v", d.scan.err, d.scan.parseState)
+			glog.V(3).Infof("Error: %s\nStack: %+#v", d.scan.err, d.scan.parseState)
 		}
 	}
 	return r
@@ -257,7 +257,7 @@ func (d *decodeState) scanPayload() ([]byte, error) {
 	start := d.off
 	op := d.scanWhile(scanContinue)
 	if op != scanEndPayload {
-		glog.V(2).Infof("expected endPayload, got %d", op)
+		glog.V(3).Infof("expected endPayload, got %d", op)
 		return nil, errPhase
 	}
 	return d.data[start:d.off], nil
@@ -302,21 +302,21 @@ func (d *decodeState) scanInt(t int) (int64, error) {
 	case scanInt16:
 		var v int16
 		if err := binary.Read(bytes.NewBuffer(payload), binary.BigEndian, &v); err != nil {
-			glog.V(2).Infof("Invalid int value: %s", err)
+			glog.V(3).Infof("Invalid int value: %s", err)
 			return 0, err
 		}
 		return int64(v), nil
 	case scanInt32:
 		var v int32
 		if err := binary.Read(bytes.NewBuffer(payload), binary.BigEndian, &v); err != nil {
-			glog.V(2).Infof("Invalid int value: %s", err)
+			glog.V(3).Infof("Invalid int value: %s", err)
 			return 0, err
 		}
 		return int64(v), nil
 	case scanInt64:
 		var v int64
 		if err := binary.Read(bytes.NewBuffer(payload), binary.BigEndian, &v); err != nil {
-			glog.V(2).Infof("Invalid int value: %s", err)
+			glog.V(3).Infof("Invalid int value: %s", err)
 			return 0, err
 		}
 		return v, nil
@@ -341,7 +341,7 @@ func (d *decodeState) value(v reflect.Value, op int) {
 
 	switch op {
 	default:
-		glog.V(2).Infof("want beginLiteral, beginObject or beginArray, got %s", scanToName[op])
+		glog.V(3).Infof("want beginLiteral, beginObject or beginArray, got %s", scanToName[op])
 		d.error(errPhase)
 
 	case scanBeginArray:
@@ -409,7 +409,7 @@ func (d *decodeState) array(v reflect.Value) {
 		d.off--
 		d.scan.undo(scanBeginArray)
 		b := d.next()
-		glog.V(2).Infof("Object bytes: %#v", string(b))
+		glog.V(3).Infof("Object bytes: %#v", string(b))
 		var v interface{}
 		if err := Unmarshal(b, &v); err != nil {
 			d.error(err)
@@ -578,7 +578,7 @@ func (d *decodeState) object(v reflect.Value) {
 		d.off--
 		d.scan.undo(scanBeginObject)
 		b := d.next()
-		glog.V(2).Infof("Object bytes: %#v", string(b))
+		glog.V(3).Infof("Object bytes: %#v", string(b))
 		var v interface{}
 		if err := Unmarshal(b, &v); err != nil {
 			d.error(err)
@@ -768,9 +768,10 @@ func (d *decodeState) literal(v reflect.Value, op int) {
 	wantptr := op == scanNull // null
 	u, ut, pv := d.indirect(v, wantptr)
 	if u != nil {
-		// TODO(imax): scanner state is not preserved properly.
 		d.off--
+		d.scan.undo(op)
 		b := d.next()
+		glog.V(3).Infof("Literal: %#v", string(b))
 		var v interface{}
 		if err := Unmarshal(b, &v); err != nil {
 			d.error(err)
@@ -794,7 +795,7 @@ func (d *decodeState) literal(v reflect.Value, op int) {
 		}
 		s, err := d.scanString()
 		if err != nil {
-			glog.V(2).Infof("invalid string: %s", err)
+			glog.V(3).Infof("invalid string: %s", err)
 			d.error(errPhase)
 		}
 		err = ut.UnmarshalText([]byte(s))
@@ -833,7 +834,7 @@ func (d *decodeState) literal(v reflect.Value, op int) {
 	case scanString:
 		s, err := d.scanString()
 		if err != nil {
-			glog.V(2).Infof("invalid string: %s", err)
+			glog.V(3).Infof("invalid string: %s", err)
 			d.error(errPhase)
 		}
 		switch v.Kind() {

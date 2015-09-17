@@ -29,7 +29,7 @@ func checkValid(data []byte, scan *scanner) error {
 	for _, c := range data {
 		scan.bytes++
 		v := scan.step(scan, int(c))
-		glog.Infof("%#v -> %s", string([]byte{c}), scanToName[v])
+		glog.V(3).Infof("%#v -> %s", string([]byte{c}), scanToName[v])
 		if v == scanError {
 			return scan.err
 		}
@@ -47,7 +47,7 @@ func nextValue(data []byte, scan *scanner) (value, rest []byte, err error) {
 	scan.reset()
 	for i, c := range data {
 		v := scan.step(scan, int(c))
-		glog.V(2).Infof("%#v -> %s", string([]byte{c}), scanToName[v])
+		glog.V(3).Infof("%#v -> %s", string([]byte{c}), scanToName[v])
 		if v >= scanEndObject {
 			switch v {
 			// probe the scanner with a space to determine whether we will
