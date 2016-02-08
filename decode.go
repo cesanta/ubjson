@@ -91,7 +91,7 @@ func Unmarshal(data []byte, v interface{}) error {
 // a JSON value. UnmarshalJSON must copy the JSON data
 // if it wishes to retain the data after returning.
 type Unmarshaler interface {
-	UnmarshalJSON([]byte) error
+	UnmarshalUBJSON([]byte) error
 }
 
 // An UnmarshalTypeError describes a JSON value that was
@@ -355,6 +355,22 @@ func (d *decodeState) value(v reflect.Value, op int) {
 	}
 }
 
+type jsonUnmarshaler struct {
+	v json.Unmarshaler
+}
+
+func (j *jsonUnmarshaler) UnmarshalUBJSON(b []byte) error {
+	var v interface{}
+	if err := Unmarshal(b, &v); err != nil {
+		return err
+	}
+	b, err := json.Marshal(&v)
+	if err != nil {
+		return err
+	}
+	return j.v.UnmarshalJSON(b)
+}
+
 // indirect walks down v allocating pointers as needed,
 // until it gets to a non-pointer.
 // if it encounters an Unmarshaler, indirect stops and returns that.
@@ -391,6 +407,9 @@ func (d *decodeState) indirect(v reflect.Value, decodingNull bool) (Unmarshaler,
 			if u, ok := v.Interface().(Unmarshaler); ok {
 				return u, nil, reflect.Value{}
 			}
+			if u, ok := v.Interface().(json.Unmarshaler); ok {
+				return &jsonUnmarshaler{u}, nil, reflect.Value{}
+			}
 			if u, ok := v.Interface().(encoding.TextUnmarshaler); ok {
 				return nil, u, reflect.Value{}
 			}
@@ -409,19 +428,8 @@ func (d *decodeState) array(v reflect.Value) {
 		d.off--
 		d.scan.undo(scanBeginArray)
 		b := d.next()
-		glog.V(3).Infof("Object bytes: %#v", string(b))
-		var v interface{}
-		if err := Unmarshal(b, &v); err != nil {
-			d.error(err)
-			return
-		}
-		b, err := json.Marshal(&v)
-		if err != nil {
-			d.error(err)
-			return
-		}
-		err = u.UnmarshalJSON(b)
-		if err != nil {
+		glog.V(3).Infof("Array bytes: %#v", string(b))
+		if err := u.UnmarshalUBJSON(b); err != nil {
 			d.error(err)
 		}
 		return
@@ -579,18 +587,7 @@ func (d *decodeState) object(v reflect.Value) {
 		d.scan.undo(scanBeginObject)
 		b := d.next()
 		glog.V(3).Infof("Object bytes: %#v", string(b))
-		var v interface{}
-		if err := Unmarshal(b, &v); err != nil {
-			d.error(err)
-			return
-		}
-		b, err := json.Marshal(&v)
-		if err != nil {
-			d.error(err)
-			return
-		}
-		err = u.UnmarshalJSON(b)
-		if err != nil {
+		if err := u.UnmarshalUBJSON(b); err != nil {
 			d.error(err)
 		}
 		return
@@ -772,18 +769,7 @@ func (d *decodeState) literal(v reflect.Value, op int) {
 		d.scan.undo(op)
 		b := d.next()
 		glog.V(3).Infof("Literal: %#v", string(b))
-		var v interface{}
-		if err := Unmarshal(b, &v); err != nil {
-			d.error(err)
-			return
-		}
-		b, err := json.Marshal(&v)
-		if err != nil {
-			d.error(err)
-			return
-		}
-		err = u.UnmarshalJSON(b)
-		if err != nil {
+		if err := u.UnmarshalUBJSON(b); err != nil {
 			d.error(err)
 		}
 		return

@@ -192,7 +192,7 @@ func HTMLEscape(dst *bytes.Buffer, src []byte) {
 // Marshaler is the interface implemented by objects that
 // can marshal themselves into valid JSON.
 type Marshaler interface {
-	MarshalJSON() ([]byte, error)
+	MarshalUBJSON() ([]byte, error)
 }
 
 // An UnsupportedTypeError is returned by Marshal when attempting
@@ -348,6 +348,7 @@ func typeEncoder(t reflect.Type) encoderFunc {
 
 var (
 	marshalerType     = reflect.TypeOf(new(Marshaler)).Elem()
+	jsonMarshalerType = reflect.TypeOf(new(json.Marshaler)).Elem()
 	textMarshalerType = reflect.TypeOf(new(encoding.TextMarshaler)).Elem()
 )
 
@@ -360,6 +361,15 @@ func newTypeEncoder(t reflect.Type, allowAddr bool) encoderFunc {
 	if t.Kind() != reflect.Ptr && allowAddr {
 		if reflect.PtrTo(t).Implements(marshalerType) {
 			return newCondAddrEncoder(addrMarshalerEncoder, newTypeEncoder(t, false))
+		}
+	}
+
+	if t.Implements(jsonMarshalerType) {
+		return jsonMarshalerEncoder
+	}
+	if t.Kind() != reflect.Ptr && allowAddr {
+		if reflect.PtrTo(t).Implements(jsonMarshalerType) {
+			return newCondAddrEncoder(addrJsonMarshalerEncoder, newTypeEncoder(t, false))
 		}
 	}
 
@@ -412,10 +422,41 @@ func marshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 		return
 	}
 	m := v.Interface().(Marshaler)
+	b, err := m.MarshalUBJSON()
+	if err != nil {
+		e.error(&MarshalerError{v.Type(), err})
+		return
+	}
+	e.Buffer.Write(b)
+}
+
+func addrMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
+	va := v.Addr()
+	if va.IsNil() {
+		e.WriteString("Z")
+		return
+	}
+	m := va.Interface().(Marshaler)
+	b, err := m.MarshalUBJSON()
+	if err != nil {
+		e.error(&MarshalerError{v.Type(), err})
+		return
+	}
+	e.Buffer.Write(b)
+}
+
+func jsonMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
+	if v.Kind() == reflect.Ptr && v.IsNil() {
+		e.WriteString("Z")
+		return
+	}
+	m := v.Interface().(json.Marshaler)
 	b, err := m.MarshalJSON()
 	if err == nil {
 		var v interface{}
-		if err := json.Unmarshal(b, &v); err != nil {
+		d := json.NewDecoder(bytes.NewReader(b))
+		d.UseNumber()
+		if err := d.Decode(&v); err != nil {
 			e.error(err)
 			return
 		}
@@ -431,17 +472,19 @@ func marshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	}
 }
 
-func addrMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
+func addrJsonMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	va := v.Addr()
 	if va.IsNil() {
 		e.WriteString("Z")
 		return
 	}
-	m := va.Interface().(Marshaler)
+	m := va.Interface().(json.Marshaler)
 	b, err := m.MarshalJSON()
 	if err == nil {
 		var v interface{}
-		if err := json.Unmarshal(b, &v); err != nil {
+		d := json.NewDecoder(bytes.NewReader(b))
+		d.UseNumber()
+		if err := d.Decode(&v); err != nil {
 			e.error(err)
 			return
 		}
