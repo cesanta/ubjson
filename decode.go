@@ -91,7 +91,7 @@ func Unmarshal(data []byte, v interface{}) error {
 // a JSON value. UnmarshalJSON must copy the JSON data
 // if it wishes to retain the data after returning.
 type Unmarshaler interface {
-	UnmarshalJSON([]byte) error
+	UnmarshalUBJSON([]byte) error
 }
 
 // An UnmarshalTypeError describes a JSON value that was
@@ -156,22 +156,6 @@ func (d *decodeState) unmarshal(v interface{}) (err error) {
 	// test must be applied at the top level of the value.
 	d.value(rv, d.scanOnce())
 	return d.savedError
-}
-
-// A Number represents a JSON number literal.
-type Number string
-
-// String returns the literal text of the number.
-func (n Number) String() string { return string(n) }
-
-// Float64 returns the number as a float64.
-func (n Number) Float64() (float64, error) {
-	return strconv.ParseFloat(string(n), 64)
-}
-
-// Int64 returns the number as an int64.
-func (n Number) Int64() (int64, error) {
-	return strconv.ParseInt(string(n), 10, 64)
 }
 
 // decodeState represents the state while decoding a JSON value.
@@ -355,6 +339,22 @@ func (d *decodeState) value(v reflect.Value, op int) {
 	}
 }
 
+type jsonUnmarshaler struct {
+	v json.Unmarshaler
+}
+
+func (j *jsonUnmarshaler) UnmarshalUBJSON(b []byte) error {
+	var v interface{}
+	if err := Unmarshal(b, &v); err != nil {
+		return err
+	}
+	b, err := json.Marshal(&v)
+	if err != nil {
+		return err
+	}
+	return j.v.UnmarshalJSON(b)
+}
+
 // indirect walks down v allocating pointers as needed,
 // until it gets to a non-pointer.
 // if it encounters an Unmarshaler, indirect stops and returns that.
@@ -391,6 +391,9 @@ func (d *decodeState) indirect(v reflect.Value, decodingNull bool) (Unmarshaler,
 			if u, ok := v.Interface().(Unmarshaler); ok {
 				return u, nil, reflect.Value{}
 			}
+			if u, ok := v.Interface().(json.Unmarshaler); ok {
+				return &jsonUnmarshaler{u}, nil, reflect.Value{}
+			}
 			if u, ok := v.Interface().(encoding.TextUnmarshaler); ok {
 				return nil, u, reflect.Value{}
 			}
@@ -409,19 +412,8 @@ func (d *decodeState) array(v reflect.Value) {
 		d.off--
 		d.scan.undo(scanBeginArray)
 		b := d.next()
-		glog.V(3).Infof("Object bytes: %#v", string(b))
-		var v interface{}
-		if err := Unmarshal(b, &v); err != nil {
-			d.error(err)
-			return
-		}
-		b, err := json.Marshal(&v)
-		if err != nil {
-			d.error(err)
-			return
-		}
-		err = u.UnmarshalJSON(b)
-		if err != nil {
+		glog.V(3).Infof("Array bytes: %#v", string(b))
+		if err := u.UnmarshalUBJSON(b); err != nil {
 			d.error(err)
 		}
 		return
@@ -579,18 +571,7 @@ func (d *decodeState) object(v reflect.Value) {
 		d.scan.undo(scanBeginObject)
 		b := d.next()
 		glog.V(3).Infof("Object bytes: %#v", string(b))
-		var v interface{}
-		if err := Unmarshal(b, &v); err != nil {
-			d.error(err)
-			return
-		}
-		b, err := json.Marshal(&v)
-		if err != nil {
-			d.error(err)
-			return
-		}
-		err = u.UnmarshalJSON(b)
-		if err != nil {
+		if err := u.UnmarshalUBJSON(b); err != nil {
 			d.error(err)
 		}
 		return
@@ -751,7 +732,7 @@ func (d *decodeState) object(v reflect.Value) {
 // depending on the setting of d.useNumber.
 func (d *decodeState) convertNumber(s string) (interface{}, error) {
 	if d.useNumber {
-		return Number(s), nil
+		return json.Number(s), nil
 	}
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
@@ -760,7 +741,7 @@ func (d *decodeState) convertNumber(s string) (interface{}, error) {
 	return f, nil
 }
 
-var numberType = reflect.TypeOf(Number(""))
+var numberType = reflect.TypeOf(json.Number(""))
 
 // literalStore decodes a literal stored in item into v.
 func (d *decodeState) literal(v reflect.Value, op int) {
@@ -772,18 +753,7 @@ func (d *decodeState) literal(v reflect.Value, op int) {
 		d.scan.undo(op)
 		b := d.next()
 		glog.V(3).Infof("Literal: %#v", string(b))
-		var v interface{}
-		if err := Unmarshal(b, &v); err != nil {
-			d.error(err)
-			return
-		}
-		b, err := json.Marshal(&v)
-		if err != nil {
-			d.error(err)
-			return
-		}
-		err = u.UnmarshalJSON(b)
-		if err != nil {
+		if err := u.UnmarshalUBJSON(b); err != nil {
 			d.error(err)
 		}
 		return
