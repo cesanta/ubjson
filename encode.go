@@ -633,7 +633,22 @@ func stringEncoder(e *encodeState, v reflect.Value, quoted bool) {
 		if numStr == "" {
 			numStr = "0" // Number's zero-val
 		}
-		e.WriteByte('S')
+		u, err := strconv.ParseUint(numStr, 10, 64)
+		if err == nil {
+			uintEncoder(e, reflect.ValueOf(u), quoted)
+			return
+		}
+		i, err := strconv.ParseInt(numStr, 10, 64)
+		if err == nil {
+			intEncoder(e, reflect.ValueOf(i), quoted)
+			return
+		}
+		f, err := strconv.ParseFloat(numStr, 64)
+		if err == nil {
+			float64Encoder(e, reflect.ValueOf(f), quoted)
+			return
+		}
+		e.WriteByte('H')
 		e.string(numStr)
 		return
 	}
