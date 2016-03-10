@@ -215,7 +215,6 @@ func (d *decodeState) scanOnce() int {
 		c := int(d.data[d.off])
 		d.off++
 		r = d.scan.step(&d.scan, c)
-		glog.V(3).Infof("%#v -> %s", string([]byte{byte(c)}), scanToName[r])
 		if r == scanError {
 			glog.V(3).Infof("Error: %s\nStack: %+#v", d.scan.err, d.scan.parseState)
 		}
@@ -412,7 +411,6 @@ func (d *decodeState) array(v reflect.Value) {
 		d.off--
 		d.scan.undo(scanBeginArray)
 		b := d.next()
-		glog.V(3).Infof("Array bytes: %#v", string(b))
 		if err := u.UnmarshalUBJSON(b); err != nil {
 			d.error(err)
 		}
@@ -570,7 +568,6 @@ func (d *decodeState) object(v reflect.Value) {
 		d.off--
 		d.scan.undo(scanBeginObject)
 		b := d.next()
-		glog.V(3).Infof("Object bytes: %#v", string(b))
 		if err := u.UnmarshalUBJSON(b); err != nil {
 			d.error(err)
 		}
@@ -752,7 +749,6 @@ func (d *decodeState) literal(v reflect.Value, op int) {
 		d.off--
 		d.scan.undo(op)
 		b := d.next()
-		glog.V(3).Infof("Literal: %#v", string(b))
 		if err := u.UnmarshalUBJSON(b); err != nil {
 			d.error(err)
 		}
