@@ -582,13 +582,18 @@ func uintEncoder(e *encodeState, v reflect.Value, _ bool) {
 	switch v.Kind() {
 	case reflect.Uint8:
 		t = v.Kind()
-	case reflect.Uint16, reflect.Uint32:
-		// TODO(imax): choose the smallest possible type here.
-		t = reflect.Int64
-	case reflect.Uint64, reflect.Uint, reflect.Uintptr:
-		if v.Uint() <= 9223372036854775807 {
+	case reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uint, reflect.Uintptr:
+		n := v.Uint()
+		switch {
+		case n <= 255:
+			t = reflect.Uint8
+		case n <= 32767:
+			t = reflect.Int16
+		case n <= 2147483647:
+			t = reflect.Int32
+		case n <= 9223372036854775807:
 			t = reflect.Int64
-		} else {
+		default:
 			t = reflect.String
 		}
 	}
@@ -596,6 +601,12 @@ func uintEncoder(e *encodeState, v reflect.Value, _ bool) {
 	case reflect.Uint8:
 		e.WriteByte('U')
 		binary.Write(e, binary.BigEndian, uint8(v.Uint()))
+	case reflect.Int16:
+		e.WriteByte('I')
+		binary.Write(e, binary.BigEndian, int16(v.Uint()))
+	case reflect.Int32:
+		e.WriteByte('l')
+		binary.Write(e, binary.BigEndian, int32(v.Uint()))
 	case reflect.Int64:
 		e.WriteByte('L')
 		binary.Write(e, binary.BigEndian, int64(v.Uint()))
