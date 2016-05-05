@@ -312,13 +312,12 @@ func (d *decodeState) scanInt(t int) (int64, error) {
 // it updates d.off to point past the decoded value.
 func (d *decodeState) value(v reflect.Value, op int) {
 	if !v.IsValid() {
-		d.off--
-		d.scan.undo(op)
-		_, rest, err := nextValue(d.data[d.off:], &d.nextscan)
+		_, rest, err := nextValue(d.data[d.off-1:], &d.nextscan)
 		if err != nil {
 			d.error(err)
 		}
 		d.off = len(d.data) - len(rest)
+		endValue(&d.scan)
 		return
 	}
 
